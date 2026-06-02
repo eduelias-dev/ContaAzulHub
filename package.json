@@ -1,0 +1,13 @@
+{
+  "name": "conta-azul-hub",
+  "version": "1.0.0",
+  "description": "Technical test project - Conta Azul OAuth integration",
+  "private": true,
+  "workspaces": [
+    "packages/backend",
+    "packages/frontend"
+  ],
+  "devDependencies": {
+    "@esbuild/win32-x64": "^0.28.0"
+  }
+}

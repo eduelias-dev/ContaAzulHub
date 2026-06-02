@@ -1,0 +1,56 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  // Relations
+  contaAzulAuth ContaAzulAuth?
+  payables      Payable[]
+
+  @@map("companies")
+}
+
+model ContaAzulAuth {
+  id        String   @id @default(cuid())
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId String   @unique
+  
+  accessToken  String
+  /// @zod.string().describe('Should ideally be encrypted in production')
+  refreshToken String
+  expiresAt    DateTime
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("conta_azul_auth")
+}
+
+model Payable {
+  id            String   @id @default(cuid())
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId     String
+  
+  contaAzulId   String   @unique
+  description   String
+  value         Decimal  @db.Decimal(15, 2)
+  dueDate       DateTime
+  status        String   @default("pending")
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payables")
+}

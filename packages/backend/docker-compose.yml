@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: conta_azul_db
+    environment:
+      POSTGRES_USER: conta_azul_user
+      POSTGRES_PASSWORD: conta_azul_password
+      POSTGRES_DB: conta_azul_hub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conta_azul_user -d conta_azul_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
