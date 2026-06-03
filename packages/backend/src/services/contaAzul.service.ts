@@ -32,8 +32,11 @@ export class ContaAzulService {
   constructor(prisma: PrismaClient) {
     this.prisma = prisma;
     this.apiClient = axios.create({
-      baseURL: process.env.CONTA_AZUL_API_BASE_URL || 'https://api.contaazul.com',
+      baseURL: process.env.CONTA_AZUL_API_BASE_URL || 'https://api-v2.contaazul.com',
       timeout: 10000,
+      headers: {
+        'Accept': 'application/json',
+      },
     });
   }
 
@@ -180,7 +183,21 @@ export class ContaAzulService {
     } catch (error) {
       console.error(`[OAuth] Refresh token failed for company ${companyId}`);
       if (axios.isAxiosError(error) && error.response) {
-        console.error('[OAuth] Error Response Data:', JSON.stringify(error.response.data, null, 2));
+        const errorData = error.response.data;
+        console.error('[OAuth] Error Response Data:', JSON.stringify(errorData, null, 2));
+        
+        // If the error is 'invalid_grant', the refresh token is no longer valid
+        // and we should disconnect the company by removing the auth record
+        if (errorData.error === 'invalid_grant') {
+          console.log(`[OAuth] Refresh token is invalid (invalid_grant). Disconnecting company ${companyId}...`);
+          await this.prisma.contaAzulAuth.delete({
+            where: { companyId }
+          }).catch(deleteError => {
+            console.error('[OAuth] Failed to delete invalid auth record:', deleteError);
+          });
+          
+          throw new Error('CONTA_AZUL_DISCONNECTED');
+        }
       }
       throw new Error('Failed to refresh access token');
     }
@@ -223,64 +240,147 @@ export class ContaAzulService {
     page: number = 1,
     pageSize: number = 50
   ): Promise<PayablesResponse> {
+    const url = 'https://api-v2.contaazul.com/v1/financeiro/eventos-financeiros/contas-a-pagar/buscar';
+    let currentToken = '';
+    
     try {
       // Ensure we have a valid token
-      const accessToken = await this.getValidAccessToken(companyId);
+      currentToken = await this.getValidAccessToken(companyId);
 
-      const response = await this.apiClient.get('/v1/payables', {
+      // Calcular intervalo de datas padrão (1 ano atrás até 2 anos no futuro)
+      const now = new Date();
+      const startDate = new Date();
+      startDate.setFullYear(now.getFullYear() - 1);
+      const endDate = new Date();
+      endDate.setFullYear(now.getFullYear() + 2);
+
+      const formatDate = (date: Date) => date.toISOString().split('T')[0];
+
+      console.log(`[API] Fetching payables for company ${companyId} (Page ${page})...`);
+      console.log(`[API] Range: ${formatDate(startDate)} to ${formatDate(endDate)}`);
+      
+      const response = await axios.get(url, {
         headers: {
-          Authorization: `Bearer ${accessToken}`,
+          'Authorization': `Bearer ${currentToken.trim()}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
         },
         params: {
-          page,
-          pageSize,
+          pagina: page,
+          tamanho_pagina: pageSize,
+          data_vencimento_de: formatDate(startDate),
+          data_vencimento_ate: formatDate(endDate)
         },
+        timeout: 10000
       });
 
+      const data = Array.isArray(response.data) 
+        ? response.data 
+        : (response.data.itens || response.data.items || response.data.data || []);
+      
+      // Helper para converter qualquer valor da API em número (trata string "1.250,50", null, etc)
+      const parseValue = (val: any): number => {
+        if (val === null || val === undefined) return 0;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          // Remove símbolos de moeda e trata formato brasileiro (1.000,50 -> 1000.50)
+          const clean = val.replace(/[R$\s.]/g, '').replace(',', '.');
+          return parseFloat(clean) || 0;
+        }
+        return 0;
+      };
+
+      if (data.length > 0) {
+        console.log('[API] First item raw data:', JSON.stringify(data[0], null, 2));
+      }
+      
       return {
-        data: response.data.data || [],
-        pagination: response.data.pagination || {
-          page,
-          pageSize,
-          totalPages: 1,
-          totalCount: response.data.data?.length || 0,
+        data: data.map((item: any) => {
+          // Identify value - Based on raw data, the field is 'total'
+          const rawValue = item.total !== undefined ? item.total : 
+                        item.valor !== undefined ? item.valor :
+                        item.valor_total !== undefined ? item.valor_total :
+                        (item.value || 0);
+
+          const value = parseValue(rawValue);
+
+          console.log(`[API] Mapping item: ${item.descricao || 'N/A'} -> Total Field: ${item.total} -> Parsed: ${value}`);
+
+          return {
+            id: item.id,
+            description: item.descricao || item.nome_fornecedor || 'Sem descrição',
+            value: value,
+            dueDate: item.data_vencimento || item.dueDate || new Date().toISOString(),
+            // Based on raw data, status is in 'status_traduzido'
+            status: item.status_traduzido || item.situacao || item.status || 'PENDENTE',
+          };
+        }),
+        pagination: {
+          page: response.data.pagina || page,
+          pageSize: response.data.tamanho_pagina || pageSize,
+          totalPages: response.data.total_paginas || 1,
+          totalCount: response.data.total_elementos || data.length,
         },
       };
     } catch (error) {
-      // Tentar auto-refresh se for erro de autenticação (401)
-      if (axios.isAxiosError(error) && error.response?.status === 401) {
-        console.log(`[OAuth] Token expired for company ${companyId}. Attempting auto-refresh...`);
-        try {
-          const tokenResponse = await this.refreshAccessToken(companyId);
-          
-          // Tentar novamente com o novo token
-          const retryResponse = await this.apiClient.get('/v1/payables', {
-            headers: {
-              Authorization: `Bearer ${tokenResponse.access_token}`,
-            },
-            params: {
-              page,
-              pageSize,
-            },
-          });
+      if (axios.isAxiosError(error) && error.response) {
+        console.error(`[API] Error ${error.response.status} for company ${companyId}`);
+        console.error(`[API] Response Body:`, JSON.stringify(error.response.data, null, 2));
+        
+        // Se for 401, tentar UM auto-refresh se ainda não tentamos nesta execução
+        if (error.response.status === 401) {
+          console.log(`[OAuth] 401 Detected. Attempting force refresh...`);
+          try {
+            const tokenResponse = await this.refreshAccessToken(companyId);
+            const newToken = tokenResponse.access_token;
+            
+            const retryResponse = await axios.get(url, {
+              headers: {
+                'Authorization': `Bearer ${newToken.trim()}`,
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+              },
+              params: {
+                pagina: page,
+                tamanho_pagina: pageSize,
+              },
+              timeout: 10000
+            });
 
-          return {
-            data: retryResponse.data.data || [],
-            pagination: retryResponse.data.pagination || {
-              page,
-              pageSize,
-              totalPages: 1,
-              totalCount: retryResponse.data.data?.length || 0,
-            },
-          };
-        } catch (refreshError) {
-          console.error('[OAuth] Auto-refresh failed during fetchPayables:', refreshError);
-          throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
+            const data = Array.isArray(retryResponse.data) 
+              ? retryResponse.data 
+              : (retryResponse.data.itens || retryResponse.data.items || retryResponse.data.data || []);
+
+            return {
+              data: data.map((item: any) => ({
+                id: item.id,
+                description: item.description || item.nome_fornecedor || 'Sem descrição',
+                value: item.valor || item.value || 0,
+                dueDate: item.data_vencimento || item.dueDate || new Date().toISOString(),
+                status: item.status || 'PENDING',
+              })),
+              pagination: {
+                page: retryResponse.data.pagina || page,
+                pageSize: retryResponse.data.tamanho_pagina || pageSize,
+                totalPages: retryResponse.data.total_paginas || 1,
+                totalCount: retryResponse.data.total_elementos || data.length,
+              },
+            };
+          } catch (refreshError) {
+            console.error('[OAuth] Force refresh or retry failed:', refreshError);
+            if (refreshError instanceof Error && refreshError.message === 'CONTA_AZUL_DISCONNECTED') {
+              throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
+            }
+          }
         }
       }
 
+      if (error instanceof Error && error.message === 'CONTA_AZUL_DISCONNECTED') {
+        throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
+      }
+
       console.error(`Error fetching payables for company ${companyId}:`, error);
-      throw new Error('Failed to fetch payables from Conta Azul API');
+      throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
     }
   }
 
@@ -300,35 +400,49 @@ export class ContaAzulService {
 
         // Upsert payables in database
         for (const payable of payables) {
-          await this.prisma.payable.upsert({
-            where: { contaAzulId: payable.id },
-            update: {
-              description: payable.description,
-              value: payable.value,
-              dueDate: new Date(payable.dueDate),
-              status: payable.status,
-            },
-            create: {
-              companyId,
-              contaAzulId: payable.id,
-              description: payable.description,
-              value: payable.value,
-              dueDate: new Date(payable.dueDate),
-              status: payable.status,
-            },
-          });
-          totalSynced++;
+          console.log(`[DB] Upserting payable ${payable.id} for company ${companyId}`);
+          try {
+            const result = await this.prisma.payable.upsert({
+              where: { contaAzulId: payable.id },
+              update: {
+                companyId, // Ensure it's linked to the correct company even if it existed before
+                description: payable.description,
+                value: payable.value,
+                dueDate: new Date(payable.dueDate),
+                status: payable.status,
+              },
+              create: {
+                companyId,
+                contaAzulId: payable.id,
+                description: payable.description,
+                value: payable.value,
+                dueDate: new Date(payable.dueDate),
+                status: payable.status,
+              },
+            });
+            console.log(`[DB] Successfully saved payable ${result.id}`);
+            totalSynced++;
+          } catch (dbError) {
+            console.error(`[DB] Error saving payable ${payable.id}:`, dbError);
+          }
         }
 
         // Check if there are more pages
         const { totalPages, page: currentPage } = response.pagination;
         hasMorePages = currentPage < totalPages;
         page++;
+
+        // Safety break for tests or unexpected API behavior
+        if (page > 100) break;
       }
 
       return totalSynced;
     } catch (error) {
       console.error(`Error syncing payables for company ${companyId}:`, error);
+      // Propagate the friendly message if it's what we got from fetchPayablesFromAPI
+      if (error instanceof Error && error.message.includes('Sua conexão com a Conta Azul expirou')) {
+        throw error;
+      }
       throw new Error('Failed to sync payables');
     }
   }
@@ -372,8 +486,13 @@ export class ContaAzulService {
    */
   getAuthorizationUrl(state: string): string {
     const clientId = process.env.CONTA_AZUL_CLIENT_ID || '';
-    const redirectUri = process.env.CONTA_AZUL_REDIRECT_URI || 'https://shut-embassy-polio.ngrok-free.dev/api/auth/callback/';
+    let redirectUri = process.env.CONTA_AZUL_REDIRECT_URI || 'https://shut-embassy-polio.ngrok-free.dev/api/auth/callback/';
     
+    // Ensure redirectUri matches what we use in exchangeCodeForToken
+    if (!redirectUri.endsWith('/')) {
+      redirectUri += '/';
+    }
+
     if (!clientId) {
       throw new Error('CONTA_AZUL_CLIENT_ID environment variable is required');
     }
@@ -383,10 +502,12 @@ export class ContaAzulService {
       client_id: clientId,
       redirect_uri: redirectUri,
       state,
-      scope: 'openid profile', 
+      // API v2 requires these specific Cognito scopes. 
+      // Permissions are managed in the Developer Portal, not via these scopes.
+      scope: 'openid profile aws.cognito.signin.user.admin', 
     });
 
-    console.log('[OAuth] Generating authorization URL with scope: openid profile sales financial');
+    console.log('[OAuth] Generating authorization URL with Cognito scopes');
     // Production OAuth authorization endpoint
     return `https://auth.contaazul.com/login?${params.toString()}`;
   }

@@ -62,6 +62,8 @@ export const listPayables = async (req: Request, res: Response): Promise<void> =
       prisma.payable.count({ where: { companyId } }),
     ]);
 
+    console.log(`[Backend] Found ${payables.length} payables for company ${companyId}. Total in DB: ${total}`);
+
     const totalPages = Math.ceil(total / pageSize);
 
     res.json({

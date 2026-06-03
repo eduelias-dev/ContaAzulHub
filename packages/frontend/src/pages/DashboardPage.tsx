@@ -129,11 +129,35 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ companyId }) => {
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8 transition-colors duration-200">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-            Dashboard {companyName ? `- ${companyName}` : ''}
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400">Contas a Pagar Sincronizadas</p>
+        <div className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+              Dashboard {companyName ? `- ${companyName}` : ''}
+            </h1>
+            <p className="text-gray-600 dark:text-gray-400">Contas a Pagar Sincronizadas</p>
+          </div>
+          
+          <button
+            onClick={handleSync}
+            disabled={isSyncing || isLoading}
+            className={`flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg font-semibold transition-all shadow-md
+              ${isSyncing || isLoading
+                ? 'bg-gray-200 dark:bg-gray-700 text-gray-400 cursor-not-allowed'
+                : 'bg-conta-azul text-white hover:bg-conta-azul-dark shadow-blue-500/20 active:scale-95'
+              }
+            `}
+          >
+            {isSyncing ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                Sincronizando...
+              </>
+            ) : (
+              <>
+                Sincronizar Agora
+              </>
+            )}
+          </button>
         </div>
 
         {/* Error Message */}
@@ -156,7 +180,10 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ companyId }) => {
             <p className="text-gray-600 dark:text-gray-400 text-sm mb-1">Valor Total</p>
             <p className="text-3xl font-bold text-gray-900 dark:text-white">
               {formatCurrency(
-                payables.reduce((sum, p) => sum + (Number(p.value) || 0), 0)
+                payables.reduce((sum, p) => {
+                  const val = typeof p.value === 'string' ? parseFloat(p.value) : p.value;
+                  return sum + (val || 0);
+                }, 0)
               )}
             </p>
           </div>
