@@ -6,7 +6,7 @@ import axios from 'axios';
 const OAUTH_CONFIG = {
   authorizationEndpoint: 'https://auth.contaazul.com/login',
   tokenEndpoint: 'https://auth.contaazul.com/oauth2/token',
-  redirectUri: 'https://contaazul.com', // This should be updated by environment variables
+  redirectUri: 'https://contaazul.com',
   scope: 'openid profile aws.cognito.signin.user.admin',
 };
 
@@ -54,7 +54,8 @@ export function generateAuthorizationUrl(state: string): string {
 }
 
 /**
- * Exchange authorization code for OAuth tokens from Conta Azul (Production)
+ * Exchange authorization
+ *  code for OAuth tokens from Conta Azul (Production)
  * 
  * This function implements the Authorization Code Grant flow:
  * 1. User is redirected to https://auth.contaazul.com/login with client_id and scopes
