@@ -64,3 +64,17 @@ export const payableAPI = {
     return response.data;
   },
 };
+
+export const receivableAPI = {
+  listReceivables: async (companyId: string, page: number = 1, pageSize: number = 20) => {
+    const response = await api.get(`/receivables/${companyId}`, {
+      params: { page, pageSize },
+    });
+    return response.data;
+  },
+
+  syncReceivables: async (companyId: string) => {
+    const response = await api.post(`/receivables/${companyId}/sync`);
+    return response.data;
+  },
+};

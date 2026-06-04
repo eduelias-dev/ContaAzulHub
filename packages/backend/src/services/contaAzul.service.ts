@@ -5,9 +5,11 @@ interface TokenResponse {
   access_token: string;
   refresh_token: string;
   expires_in: number;
+  company_id?: string;
+  company_name?: string;
 }
 
-interface PayableItem {
+interface FinancialItem {
   id: string;
   description: string;
   value: number;
@@ -15,8 +17,8 @@ interface PayableItem {
   status: string;
 }
 
-interface PayablesResponse {
-  data: PayableItem[];
+interface FinancialResponse {
+  data: FinancialItem[];
   pagination: {
     page: number;
     pageSize: number;
@@ -31,9 +33,10 @@ export class ContaAzulService {
 
   constructor(prisma: PrismaClient) {
     this.prisma = prisma;
+    // Forçamos o host para api-v2 para evitar que variáveis de ambiente apontem para o host legado
     this.apiClient = axios.create({
-      baseURL: process.env.CONTA_AZUL_API_BASE_URL || 'https://api-v2.contaazul.com',
-      timeout: 10000,
+      baseURL: 'https://api-v2.contaazul.com',
+      timeout: 20000,
       headers: {
         'Accept': 'application/json',
       },
@@ -45,16 +48,15 @@ export class ContaAzulService {
    * Production endpoint: https://auth.contaazul.com/oauth2/token
    * 
    * @param code - The authorization code received from the OAuth login flow
-   * @returns TokenResponse with access_token, refresh_token, and expires_in
+   * @returns Array of TokenResponse (handles multi-tenant/batch tokens)
    */
-  async exchangeCodeForToken(code: string): Promise<TokenResponse> {
+  async exchangeCodeForToken(code: string): Promise<TokenResponse[]> {
     try {
       const clientId = process.env.CONTA_AZUL_CLIENT_ID || '';
       const clientSecret = process.env.CONTA_AZUL_CLIENT_SECRET || '';
       
-      // 4. Redirect URI: Garantir que termine com /
-      let redirectUri = process.env.CONTA_AZUL_REDIRECT_URI || 'https://shut-embassy-polio.ngrok-free.dev/api/auth/callback/';
-      if (!redirectUri.endsWith('/')) {
+      let redirectUri = process.env.CONTA_AZUL_REDIRECT_URI || '';
+      if (redirectUri && !redirectUri.endsWith('/')) {
         redirectUri += '/';
       }
       
@@ -62,18 +64,15 @@ export class ContaAzulService {
         throw new Error('Missing CONTA_AZUL_CLIENT_ID or CONTA_AZUL_CLIENT_SECRET environment variables');
       }
 
-      // 3. Authorization Header: Conversão para Base64
       const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
-      // 1. Formato do Body: Utilizar URLSearchParams para x-www-form-urlencoded
       const params = new URLSearchParams();
       params.append('code', code);
       params.append('grant_type', 'authorization_code');
       params.append('redirect_uri', redirectUri);
 
-      console.log('[OAuth] Exchanging authorization code for tokens (x-www-form-urlencoded)...');
+      console.log('[OAuth] Exchanging authorization code for tokens...');
 
-      // 2. Headers Corretos: application/x-www-form-urlencoded
       const response = await axios.post(
         'https://auth.contaazul.com/oauth2/token',
         params.toString(),
@@ -85,28 +84,57 @@ export class ContaAzulService {
         }
       );
 
-      // 4. Tratamento de Resposta (Sucesso)
       console.log('[OAuth] Token exchange successful!');
-      console.log('[OAuth] Scopes granted:', response.data.scope || 'default');
-
-      return {
-        access_token: response.data.access_token,
-        refresh_token: response.data.refresh_token,
-        expires_in: response.data.expires_in,
-      };
+      
+      // Handle array response (Conta Azul Mais) or single object
+      const tokens = Array.isArray(response.data) ? response.data : [response.data];
+      
+      return tokens.map((t: any) => ({
+        access_token: t.access_token,
+        refresh_token: t.refresh_token,
+        expires_in: t.expires_in,
+        company_id: t.company_id,
+        company_name: t.company_name,
+      }));
     } catch (error) {
-      // 5. Tratamento de Erro: console.error detalhado
       console.error('[OAuth] Token exchange failed');
       if (axios.isAxiosError(error) && error.response) {
-        console.error('[OAuth] Error Response Data:', JSON.stringify(error.response.data, null, 2));
+        console.error('[OAuth] Error Response:', JSON.stringify(error.response.data, null, 2));
         throw new Error(`OAuth Error: ${JSON.stringify(error.response.data)}`);
-      } else if (error instanceof Error) {
-        console.error('[OAuth] Error Message:', error.message);
-        throw error;
-      } else {
-        console.error('[OAuth] Unknown error:', error);
-        throw new Error('Unknown OAuth error');
       }
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch all companies accessible by the current token
+   * Useful for BPO/Accountant flow to discover managed clients
+   */
+  async fetchCompanies(accessToken: string): Promise<{ id: string, name: string }[]> {
+    try {
+      console.log('[API] Fetching accessible companies (Discovery via /v1/tenants)...');
+      
+      // Official V2 endpoint for tenant discovery
+      const response = await this.apiClient.get('/v1/tenants', {
+        headers: {
+          'Authorization': `Bearer ${accessToken.trim()}`,
+        }
+      });
+
+      const data = response.data || [];
+      console.log(`[API] Discovery found ${data.length} tenants.`);
+
+      return data.map((t: any) => ({
+        id: t.id || t.company_id,
+        name: t.name || t.company_name || t.corporate_name || `Empresa ${t.id}`
+      }));
+    } catch (error) {
+      console.error('[API] Company discovery failed:');
+      if (axios.isAxiosError(error) && error.response) {
+        console.error(`[API] Status: ${error.response.status}`);
+        console.error(`[API] Response:`, JSON.stringify(error.response.data, null, 2));
+      }
+      return [];
     }
   }
 
@@ -186,8 +214,6 @@ export class ContaAzulService {
         const errorData = error.response.data;
         console.error('[OAuth] Error Response Data:', JSON.stringify(errorData, null, 2));
         
-        // If the error is 'invalid_grant', the refresh token is no longer valid
-        // and we should disconnect the company by removing the auth record
         if (errorData.error === 'invalid_grant') {
           console.log(`[OAuth] Refresh token is invalid (invalid_grant). Disconnecting company ${companyId}...`);
           await this.prisma.contaAzulAuth.delete({
@@ -232,89 +258,52 @@ export class ContaAzulService {
   }
 
   /**
-   * Fetch payables from Conta Azul API
-   * Handles pagination and returns all payables
+   * Fetch records from a specific financial endpoint (V2)
    */
-  async fetchPayablesFromAPI(
+  private async fetchFinancialRecordsFromAPI(
+    endpoint: 'contas-a-pagar' | 'contas-a-receber',
     companyId: string,
     page: number = 1,
-    pageSize: number = 50
-  ): Promise<PayablesResponse> {
-    const url = 'https://api-v2.contaazul.com/v1/financeiro/eventos-financeiros/contas-a-pagar/buscar';
-    let currentToken = '';
+    pageSize: number = 20,
+    isRetry: boolean = false
+  ): Promise<FinancialResponse> {
+    const url = `/v1/financeiro/eventos-financeiros/${endpoint}/buscar`;
     
     try {
-      // Ensure we have a valid token
-      currentToken = await this.getValidAccessToken(companyId);
+      const currentToken = await this.getValidAccessToken(companyId);
 
-      // Calcular intervalo de datas padrão (1 ano atrás até 2 anos no futuro)
       const now = new Date();
-      const startDate = new Date();
-      startDate.setFullYear(now.getFullYear() - 1);
-      const endDate = new Date();
-      endDate.setFullYear(now.getFullYear() + 2);
-
       const formatDate = (date: Date) => date.toISOString().split('T')[0];
-
-      console.log(`[API] Fetching payables for company ${companyId} (Page ${page})...`);
-      console.log(`[API] Range: ${formatDate(startDate)} to ${formatDate(endDate)}`);
       
-      const response = await axios.get(url, {
+      const dateFrom = new Date();
+      dateFrom.setFullYear(now.getFullYear() - 1);
+      const dateTo = new Date();
+      dateTo.setFullYear(now.getFullYear() + 1);
+
+      console.log(`[API] Fetching ${endpoint} for company ${companyId} (Page ${page})...`);
+      
+      const response = await this.apiClient.get(url, {
         headers: {
           'Authorization': `Bearer ${currentToken.trim()}`,
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
         },
         params: {
           pagina: page,
           tamanho_pagina: pageSize,
-          data_vencimento_de: formatDate(startDate),
-          data_vencimento_ate: formatDate(endDate)
+          data_vencimento_de: formatDate(dateFrom),
+          data_vencimento_ate: formatDate(dateTo),
         },
-        timeout: 10000
       });
 
-      const data = Array.isArray(response.data) 
-        ? response.data 
-        : (response.data.itens || response.data.items || response.data.data || []);
-      
-      // Helper para converter qualquer valor da API em número (trata string "1.250,50", null, etc)
-      const parseValue = (val: any): number => {
-        if (val === null || val === undefined) return 0;
-        if (typeof val === 'number') return val;
-        if (typeof val === 'string') {
-          // Remove símbolos de moeda e trata formato brasileiro (1.000,50 -> 1000.50)
-          const clean = val.replace(/[R$\s.]/g, '').replace(',', '.');
-          return parseFloat(clean) || 0;
-        }
-        return 0;
-      };
-
-      if (data.length > 0) {
-        console.log('[API] First item raw data:', JSON.stringify(data[0], null, 2));
-      }
+      const data = response.data.itens || response.data.items || response.data.data || [];
       
       return {
-        data: data.map((item: any) => {
-          // Identify value - Based on raw data, the field is 'total'
-          const rawValue = item.total !== undefined ? item.total : 
-                        item.valor !== undefined ? item.valor :
-                        item.valor_total !== undefined ? item.valor_total :
-                        (item.value || 0);
-
-          const value = parseValue(rawValue);
-
-          console.log(`[API] Mapping item: ${item.descricao || 'N/A'} -> Total Field: ${item.total} -> Parsed: ${value}`);
-
-          return {
-            id: item.id,
-            description: item.descricao || item.nome_fornecedor || 'Sem descrição',
-            value: value,
-            dueDate: item.data_vencimento || item.dueDate || new Date().toISOString(),
-            // Based on raw data, status is in 'status_traduzido'
-            status: item.status_traduzido || item.situacao || item.status || 'PENDENTE',
-          };
-        }),
+        data: data.map((item: any) => ({
+          id: item.id,
+          description: item.descricao || item.nome_fornecedor || item.nome_cliente || 'Sem descrição',
+          value: item.total || item.valor || 0,
+          dueDate: item.data_vencimento || item.due_date || new Date().toISOString(),
+          status: item.status_traduzido || item.status || 'PENDING',
+        })),
         pagination: {
           page: response.data.pagina || page,
           pageSize: response.data.tamanho_pagina || pageSize,
@@ -323,70 +312,68 @@ export class ContaAzulService {
         },
       };
     } catch (error) {
-      if (axios.isAxiosError(error) && error.response) {
-        console.error(`[API] Error ${error.response.status} for company ${companyId}`);
-        console.error(`[API] Response Body:`, JSON.stringify(error.response.data, null, 2));
-        
-        // Se for 401, tentar UM auto-refresh se ainda não tentamos nesta execução
-        if (error.response.status === 401) {
-          console.log(`[OAuth] 401 Detected. Attempting force refresh...`);
-          try {
-            const tokenResponse = await this.refreshAccessToken(companyId);
-            const newToken = tokenResponse.access_token;
-            
-            const retryResponse = await axios.get(url, {
-              headers: {
-                'Authorization': `Bearer ${newToken.trim()}`,
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-              },
-              params: {
-                pagina: page,
-                tamanho_pagina: pageSize,
-              },
-              timeout: 10000
-            });
-
-            const data = Array.isArray(retryResponse.data) 
-              ? retryResponse.data 
-              : (retryResponse.data.itens || retryResponse.data.items || retryResponse.data.data || []);
-
-            return {
-              data: data.map((item: any) => ({
-                id: item.id,
-                description: item.description || item.nome_fornecedor || 'Sem descrição',
-                value: item.valor || item.value || 0,
-                dueDate: item.data_vencimento || item.dueDate || new Date().toISOString(),
-                status: item.status || 'PENDING',
-              })),
-              pagination: {
-                page: retryResponse.data.pagina || page,
-                pageSize: retryResponse.data.tamanho_pagina || pageSize,
-                totalPages: retryResponse.data.total_paginas || 1,
-                totalCount: retryResponse.data.total_elementos || data.length,
-              },
-            };
-          } catch (refreshError) {
-            console.error('[OAuth] Force refresh or retry failed:', refreshError);
-            if (refreshError instanceof Error && refreshError.message === 'CONTA_AZUL_DISCONNECTED') {
-              throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
-            }
-          }
+      // Retry logic for 401 errors
+      if (axios.isAxiosError(error) && error.response?.status === 401 && !isRetry) {
+        console.log(`[API] 401 Detected for ${companyId}. Attempting forced token refresh...`);
+        try {
+          await this.refreshAccessToken(companyId);
+          return this.fetchFinancialRecordsFromAPI(endpoint, companyId, page, pageSize, true);
+        } catch (refreshError) {
+          console.error('[API] Forced refresh failed:', refreshError);
         }
       }
 
-      if (error instanceof Error && error.message === 'CONTA_AZUL_DISCONNECTED') {
-        throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
+      console.error(`Error fetching ${endpoint} for company ${companyId}:`);
+      if (axios.isAxiosError(error) && error.response) {
+        console.error(`[API] Status: ${error.response.status}`);
+        console.error(`[API] Response:`, JSON.stringify(error.response.data, null, 2));
       }
-
-      console.error(`Error fetching payables for company ${companyId}:`, error);
-      throw new Error('Sua conexão com a Conta Azul expirou. Por favor, conecte novamente em Configurações.');
+      throw error;
     }
   }
 
   /**
+   * Sync all financial records (Payables and Receivables) for all authorized companies
+   */
+  async syncAllCompaniesFinancials(): Promise<{ companyId: string, payables: number, receivables: number, error?: string }[]> {
+    console.log('[SyncEngine] Starting global financial synchronization (Payables & Receivables)...');
+    
+    const authorizedCompanies = await this.prisma.contaAzulAuth.findMany({
+      include: { company: true }
+    });
+
+    console.log(`[SyncEngine] Found ${authorizedCompanies.length} authorized companies.`);
+
+    const results = [];
+
+    for (const auth of authorizedCompanies) {
+      try {
+        console.log(`[SyncEngine] Processing company: ${auth.company.name} (${auth.companyId})`);
+        
+        const payablesCount = await this.syncPayables(auth.companyId);
+        const receivablesCount = await this.syncReceivables(auth.companyId);
+
+        results.push({ 
+          companyId: auth.companyId, 
+          payables: payablesCount, 
+          receivables: receivablesCount 
+        });
+      } catch (error) {
+        console.error(`[SyncEngine] Failed to sync company ${auth.companyId}:`, error);
+        results.push({ 
+          companyId: auth.companyId, 
+          payables: 0, 
+          receivables: 0,
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
    * Sync payables from Conta Azul API to local database
-   * Fetches all pages and creates/updates payables in database
    */
   async syncPayables(companyId: string): Promise<number> {
     try {
@@ -395,55 +382,95 @@ export class ContaAzulService {
       let hasMorePages = true;
 
       while (hasMorePages) {
-        const response = await this.fetchPayablesFromAPI(companyId, page, 50);
-        const payables = response.data;
+        const response = await this.fetchFinancialRecordsFromAPI('contas-a-pagar', companyId, page, 50);
+        const records = response.data;
 
-        // Upsert payables in database
-        for (const payable of payables) {
-          console.log(`[DB] Upserting payable ${payable.id} for company ${companyId}`);
+        for (const record of records) {
           try {
-            const result = await this.prisma.payable.upsert({
-              where: { contaAzulId: payable.id },
+            await this.prisma.payable.upsert({
+              where: { contaAzulId: record.id },
               update: {
-                companyId, // Ensure it's linked to the correct company even if it existed before
-                description: payable.description,
-                value: payable.value,
-                dueDate: new Date(payable.dueDate),
-                status: payable.status,
+                companyId,
+                description: record.description,
+                value: record.value,
+                dueDate: new Date(record.dueDate),
+                status: record.status,
               },
               create: {
                 companyId,
-                contaAzulId: payable.id,
-                description: payable.description,
-                value: payable.value,
-                dueDate: new Date(payable.dueDate),
-                status: payable.status,
+                contaAzulId: record.id,
+                description: record.description,
+                value: record.value,
+                dueDate: new Date(record.dueDate),
+                status: record.status,
               },
             });
-            console.log(`[DB] Successfully saved payable ${result.id}`);
             totalSynced++;
           } catch (dbError) {
-            console.error(`[DB] Error saving payable ${payable.id}:`, dbError);
+            console.error(`[DB] Error saving payable ${record.id}:`, dbError);
           }
         }
 
-        // Check if there are more pages
-        const { totalPages, page: currentPage } = response.pagination;
-        hasMorePages = currentPage < totalPages;
+        hasMorePages = page < response.pagination.totalPages;
         page++;
-
-        // Safety break for tests or unexpected API behavior
         if (page > 100) break;
       }
 
       return totalSynced;
     } catch (error) {
       console.error(`Error syncing payables for company ${companyId}:`, error);
-      // Propagate the friendly message if it's what we got from fetchPayablesFromAPI
-      if (error instanceof Error && error.message.includes('Sua conexão com a Conta Azul expirou')) {
-        throw error;
+      throw error;
+    }
+  }
+
+  /**
+   * Sync receivables from Conta Azul API to local database
+   */
+  async syncReceivables(companyId: string): Promise<number> {
+    try {
+      let page = 1;
+      let totalSynced = 0;
+      let hasMorePages = true;
+
+      while (hasMorePages) {
+        const response = await this.fetchFinancialRecordsFromAPI('contas-a-receber', companyId, page, 50);
+        const records = response.data;
+
+        for (const record of records) {
+          try {
+            await this.prisma.receivable.upsert({
+              where: { contaAzulId: record.id },
+              update: {
+                companyId,
+                description: record.description,
+                value: record.value,
+                dueDate: new Date(record.dueDate),
+                status: record.status,
+              },
+              create: {
+                companyId,
+                contaAzulId: record.id,
+                description: record.description,
+                value: record.value,
+                dueDate: new Date(record.dueDate),
+                status: record.status,
+              },
+            });
+            totalSynced++;
+          } catch (dbError) {
+            console.error(`[DB] Error saving receivable ${record.id}:`, dbError);
+          }
+        }
+
+        hasMorePages = page < response.pagination.totalPages;
+        page++;
+        if (page > 100) break;
       }
-      throw new Error('Failed to sync payables');
+
+      return totalSynced;
+    } catch (error) {
+      console.error(`Error syncing receivables for company ${companyId}:`, error);
+      throw error;
     }
   }
 
@@ -481,15 +508,13 @@ export class ContaAzulService {
 
   /**
    * Get authorization URL for OAuth flow (Production)
-   * Redirects user to Conta Azul login page: https://auth.contaazul.com/login
-   * NO credentials should be included in this URL - they are only used in the token exchange
+   * Scope must be 'openid profile aws.cognito.signin.user.admin'
    */
   getAuthorizationUrl(state: string): string {
     const clientId = process.env.CONTA_AZUL_CLIENT_ID || '';
-    let redirectUri = process.env.CONTA_AZUL_REDIRECT_URI || 'https://shut-embassy-polio.ngrok-free.dev/api/auth/callback/';
+    let redirectUri = process.env.CONTA_AZUL_REDIRECT_URI || '';
     
-    // Ensure redirectUri matches what we use in exchangeCodeForToken
-    if (!redirectUri.endsWith('/')) {
+    if (redirectUri && !redirectUri.endsWith('/')) {
       redirectUri += '/';
     }
 
@@ -502,13 +527,10 @@ export class ContaAzulService {
       client_id: clientId,
       redirect_uri: redirectUri,
       state,
-      // API v2 requires these specific Cognito scopes. 
-      // Permissions are managed in the Developer Portal, not via these scopes.
       scope: 'openid profile aws.cognito.signin.user.admin', 
     });
 
-    console.log('[OAuth] Generating authorization URL with Cognito scopes');
-    // Production OAuth authorization endpoint
+    console.log('[OAuth] Generating authorization URL with scope: openid profile aws.cognito.signin.user.admin');
     return `https://auth.contaazul.com/login?${params.toString()}`;
   }
 }

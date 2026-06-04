@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { RefreshCw, Wallet, Calendar, AlertCircle, Clock, Receipt, ArrowUpDown } from 'lucide-react';
-import { payableAPI, authAPI } from '../services/api';
+import { RefreshCw, TrendingUp, Calendar, Clock, AlertCircle, ArrowUpDown, LayoutDashboard } from 'lucide-react';
+import { receivableAPI, authAPI } from '../services/api';
 
-interface Payable {
+interface Receivable {
   id: string;
   contaAzulId: string;
   description: string;
@@ -13,53 +13,46 @@ interface Payable {
 
 type SortOption = 'date-asc' | 'date-desc' | 'val-high' | 'val-low' | 'alpha-asc';
 
-const payablesCache: Record<string, any> = {};
+const receivablesCache: Record<string, any> = {};
 
-const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
+const ReceivablesPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
   const defaultCompanyId = companyId || localStorage.getItem('companyId') || '';
   
-  const [payables, setPayables] = useState<Payable[]>([]);
+  const [receivables, setReceivables] = useState<Receivable[]>([]);
   const [companyName, setCompanyName] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
-  const [totalPayables, setTotalPayables] = useState(0);
+  const [totalReceivables, setTotalReceivables] = useState(0);
   const [sortBy, setSortBy] = useState<SortOption>('date-asc');
   const [visibleItems, setVisibleItems] = useState(15);
 
   const loadData = useCallback(async (force = false) => {
     if (!defaultCompanyId) return;
 
-    if (!force && payablesCache[defaultCompanyId]) {
-      const cache = payablesCache[defaultCompanyId];
-      setPayables(cache.data || []);
-      setTotalPayables(cache.total || 0);
-      setLastSyncAt(cache.lastSync);
+    if (!force && receivablesCache[defaultCompanyId]) {
+      const cache = receivablesCache[defaultCompanyId];
+      setReceivables(cache.data || []);
+      setTotalReceivables(cache.total || 0);
       return;
     }
 
     try {
       setIsLoading(true);
-      const [details, response, status] = await Promise.allSettled([
+      const [details, response] = await Promise.allSettled([
         authAPI.getCompanyDetails(defaultCompanyId),
-        payableAPI.listPayables(defaultCompanyId, 1, 100),
-        payableAPI.getSyncStatus(defaultCompanyId)
+        receivableAPI.listReceivables(defaultCompanyId, 1, 100)
       ]);
 
       if (details.status === 'fulfilled') setCompanyName(details.value?.name || '');
       
       const data = response.status === 'fulfilled' ? (response.value?.data || []) : [];
-      const syncStatus = status.status === 'fulfilled' ? status.value : null;
+      const total = response.status === 'fulfilled' ? (response.value?.pagination?.total || data.length) : 0;
 
-      const total = syncStatus?.totalPayables || data.length;
-      const lastSync = syncStatus?.lastSyncAt ? new Date(syncStatus.lastSyncAt) : null;
+      setReceivables(data);
+      setTotalReceivables(total);
 
-      setPayables(data);
-      setTotalPayables(total);
-      setLastSyncAt(lastSync);
-
-      payablesCache[defaultCompanyId] = { data, total, lastSync };
+      receivablesCache[defaultCompanyId] = { data, total };
     } catch (err) {
       setError('Erro ao carregar dados');
     } finally {
@@ -75,7 +68,7 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
   const handleSync = async () => {
     setIsSyncing(true);
     try {
-      await payableAPI.syncPayables(defaultCompanyId);
+      await receivableAPI.syncReceivables(defaultCompanyId);
       await loadData(true);
     } catch (err) {
       setError('Erro na sincronização');
@@ -84,8 +77,8 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
     }
   };
 
-  const sortedPayables = useMemo(() => {
-    const list = [...payables];
+  const sortedReceivables = useMemo(() => {
+    const list = [...receivables];
     switch (sortBy) {
       case 'date-asc': return list.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
       case 'date-desc': return list.sort((a, b) => new Date(b.dueDate).getTime() - new Date(a.dueDate).getTime());
@@ -94,11 +87,11 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
       case 'alpha-asc': return list.sort((a, b) => a.description.localeCompare(b.description));
       default: return list;
     }
-  }, [payables, sortBy]);
+  }, [receivables, sortBy]);
 
-  const visiblePayables = useMemo(() => {
-    return sortedPayables.slice(0, visibleItems);
-  }, [sortedPayables, visibleItems]);
+  const visibleReceivables = useMemo(() => {
+    return sortedReceivables.slice(0, visibleItems);
+  }, [sortedReceivables, visibleItems]);
 
   const formatCurrency = (val: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(parseFloat(val) || 0);
   const formatDate = (date: string) => date ? new Date(date).toLocaleDateString('pt-BR') : 'N/A';
@@ -108,8 +101,8 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
       <div className="max-w-6xl mx-auto">
         <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-8">
           <div>
-            <h1 className="text-2xl font-bold dark:text-white">Contas a Pagar {companyName && `• ${companyName}`}</h1>
-            <p className="text-gray-500">Gestão de saídas financeiras</p>
+            <h1 className="text-2xl font-bold dark:text-white">Contas a Receber {companyName && `• ${companyName}`}</h1>
+            <p className="text-gray-500">Gestão de entradas financeiras</p>
           </div>
           
           <div className="flex items-center gap-3">
@@ -120,7 +113,7 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
               <select 
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as SortOption)}
-                className="pl-10 pr-4 py-2 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg text-sm dark:text-gray-200 outline-none focus:ring-2 focus:ring-blue-500 transition-all appearance-none cursor-pointer min-w-[180px]"
+                className="pl-10 pr-4 py-2 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg text-sm dark:text-gray-200 outline-none focus:ring-2 focus:ring-green-500 transition-all appearance-none cursor-pointer min-w-[180px]"
               >
                 <option value="date-asc">Vencimento (Antigo)</option>
                 <option value="date-desc">Vencimento (Recente)</option>
@@ -133,7 +126,7 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
             <button 
               onClick={handleSync} 
               disabled={isSyncing}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-lg flex items-center gap-2 transition-all shadow-lg shadow-blue-500/20 active:scale-95 disabled:opacity-50"
+              className="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg flex items-center gap-2 transition-all shadow-lg shadow-green-500/20 active:scale-95 disabled:opacity-50"
             >
               <RefreshCw size={18} className={isSyncing ? 'animate-spin' : ''} />
               {isSyncing ? 'Sincronizando...' : 'Sincronizar'}
@@ -145,18 +138,14 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
           <AlertCircle size={20} /> {error}
         </div>}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border dark:border-gray-700 flex items-center gap-4 transition-all hover:shadow-md">
             <div className="p-3 bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-lg"><Clock size={24}/></div>
-            <div><p className="text-sm text-gray-500 dark:text-gray-400">Total Contas</p><p className="text-xl font-bold dark:text-white">{totalPayables}</p></div>
+            <div><p className="text-sm text-gray-500 dark:text-gray-400">Total Recebíveis</p><p className="text-xl font-bold dark:text-white">{totalReceivables}</p></div>
           </div>
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border dark:border-gray-700 flex items-center gap-4 transition-all hover:shadow-md">
-            <div className="p-3 bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 rounded-lg"><Wallet size={24}/></div>
-            <div><p className="text-sm text-gray-500 dark:text-gray-400">Valor Total</p><p className="text-xl font-bold dark:text-white">{formatCurrency(payables.reduce((a, b) => a + (parseFloat(b.value) || 0), 0))}</p></div>
-          </div>
-          <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border dark:border-gray-700 flex items-center gap-4 transition-all hover:shadow-md">
-            <div className="p-3 bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded-lg"><Calendar size={24}/></div>
-            <div><p className="text-sm text-gray-500 dark:text-gray-400">Última Sinc.</p><p className="text-xl font-bold dark:text-white">{lastSyncAt ? formatDate(lastSyncAt.toISOString()) : 'Nunca'}</p></div>
+            <div className="p-3 bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 rounded-lg"><TrendingUp size={24}/></div>
+            <div><p className="text-sm text-gray-500 dark:text-gray-400">Valor Total</p><p className="text-xl font-bold dark:text-white">{formatCurrency(receivables.reduce((a, b) => a + (parseFloat(b.value) || 0), 0))}</p></div>
           </div>
         </div>
 
@@ -172,41 +161,41 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
                 </tr>
               </thead>
               <tbody className="divide-y dark:divide-gray-700">
-                {visiblePayables.map(p => (
-                  <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
-                    <td className="px-6 py-4 dark:text-gray-200 font-medium">{p.description}</td>
-                    <td className="px-6 py-4 font-bold dark:text-white">{formatCurrency(p.value)}</td>
-                    <td className="px-6 py-4 text-gray-500 dark:text-gray-400">{formatDate(p.dueDate)}</td>
+                {visibleReceivables.map(r => (
+                  <tr key={r.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                    <td className="px-6 py-4 dark:text-gray-200 font-medium">{r.description}</td>
+                    <td className="px-6 py-4 font-bold dark:text-white">{formatCurrency(r.value)}</td>
+                    <td className="px-6 py-4 text-gray-500 dark:text-gray-400">{formatDate(r.dueDate)}</td>
                     <td className="px-6 py-4">
-                      <span className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400 border border-blue-100 dark:border-blue-800 flex items-center gap-1.5 w-fit">
-                        {p.status}
+                      <span className="px-3 py-1 rounded-full text-xs font-semibold bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400 border border-green-100 dark:border-green-800 flex items-center gap-1.5 w-fit">
+                        {r.status}
                       </span>
                     </td>
                   </tr>
                 ))}
-                {payables.length === 0 && !isLoading && (
+                {receivables.length === 0 && !isLoading && (
                   <tr><td colSpan={4} className="p-16 text-center">
-                    <Receipt size={48} className="mx-auto mb-4 text-gray-300 dark:text-gray-600" />
+                    <LayoutDashboard size={48} className="mx-auto mb-4 text-gray-300 dark:text-gray-600" />
                     <p className="text-gray-400">Nenhum registro encontrado.</p>
                   </td></tr>
                 )}
-                {isLoading && payables.length === 0 && (
+                {isLoading && receivables.length === 0 && (
                    <tr><td colSpan={4} className="p-16 text-center">
-                    <RefreshCw size={32} className="mx-auto mb-4 text-blue-600 animate-spin" />
+                    <RefreshCw size={32} className="mx-auto mb-4 text-green-600 animate-spin" />
                     <p className="text-gray-400">Carregando dados...</p>
                   </td></tr>
                 )}
               </tbody>
             </table>
           </div>
-          
-          {payables.length > visibleItems && (
+
+          {receivables.length > visibleItems && (
             <div className="p-4 border-t dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 text-center">
               <button
                 onClick={() => setVisibleItems(prev => prev + 15)}
-                className="text-sm font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors flex items-center gap-2 mx-auto"
+                className="text-sm font-semibold text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300 transition-colors flex items-center gap-2 mx-auto"
               >
-                Mostrar Mais ({payables.length - visibleItems} restantes)
+                Mostrar Mais ({receivables.length - visibleItems} restantes)
               </button>
             </div>
           )}
@@ -216,4 +205,4 @@ const DashboardPage: React.FC<{ companyId?: string }> = ({ companyId }) => {
   );
 };
 
-export default DashboardPage;
+export default ReceivablesPage;

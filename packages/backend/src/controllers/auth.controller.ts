@@ -50,13 +50,10 @@ export const handleOAuthCallback = async (
   res: Response
 ): Promise<void> => {
   try {
-    // 1. Capturar o Code
-    const { code, error, error_description, state } = req.query;
+    const { code, error, error_description } = req.query;
 
     console.log('=== OAuth Callback Received ===');
-    console.log('Query params:', req.query);
 
-    // Handle error from Conta Azul
     if (error) {
       console.error('Error from Conta Azul:', error, error_description);
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -69,56 +66,79 @@ export const handleOAuthCallback = async (
       return;
     }
 
-    console.log('Code received:', code);
+    // 1. Exchange code for tokens (could be multiple companies)
+    const tokenResponses = await contaAzulService.exchangeCodeForToken(code as string);
+    console.log(`[OAuth] Received tokens for ${tokenResponses.length} companies.`);
 
-    // 2 & 3. Converter Credenciais para Base64 e Disparar o POST (done inside service)
-    const tokenResponse = await contaAzulService.exchangeCodeForToken(code as string);
+    const results = [];
 
-    // 4. Tratamento de Resposta (Sucesso)
-    console.log('Successfully exchanged code for tokens:', tokenResponse);
+    // 2. Iterate through each company token and save/update
+    for (const token of tokenResponses) {
+      // If we only have one token and it doesn't have company info, it might be an accountant token
+      // Let's try to discover companies using it
+      if (tokenResponses.length === 1 && !token.company_id) {
+        console.log('[OAuth] Single token detected without company ID. Attempting discovery flow...');
+        const discoveredCompanies = await contaAzulService.fetchCompanies(token.access_token);
+        
+        if (discoveredCompanies.length > 0) {
+           console.log(`[OAuth] Discovered ${discoveredCompanies.length} companies under this login.`);
+           for (const disc of discoveredCompanies) {
+              let company = await prisma.company.findFirst({ where: { name: disc.name } });
+              if (!company) {
+                company = await prisma.company.create({ data: { name: disc.name } });
+              }
+              
+              // Note: In BPO flow, sometimes we use the SAME token for all companies
+              // or the API provides a way to switch context. For now, we link the same token.
+              await contaAzulService.saveCompanyAuth(
+                company.id,
+                token.access_token,
+                token.refresh_token,
+                token.expires_in
+              );
+              results.push({ id: company.id, name: company.name, caId: disc.id });
+           }
+           continue; // Move to next token (though there is only one in this branch)
+        }
+      }
 
-    // Create or find company
-    let companyId = req.query.state; // Using state as a potential carrier for companyId if needed, or check query
-    
-    let company;
-    
-    // Check if we already have a valid companyId to link to
-    if (companyId && companyId.length > 10) { // Simple check to see if it looks like a CUID/UUID
-       company = await prisma.company.findUnique({ where: { id: companyId } });
-    }
+      // Standard single-company or batch-token flow
+      const caCompanyId = token.company_id || `ca_${Date.now()}`;
+      const caCompanyName = token.company_name || `Empresa ${caCompanyId}`;
 
-    if (!company) {
-      const companyName = (req.query.companyName as string) || `Company ${Date.now()}`;
-      
-      // Using create instead of upsert as 'name' is not unique
-      company = await prisma.company.create({
-        data: {
-          name: companyName,
-        },
+      let company = await prisma.company.findFirst({
+        where: { name: caCompanyName }
       });
-      console.log('Created new company:', company.id);
-    } else {
-      console.log('Using existing company:', company.id);
+
+      if (!company) {
+        company = await prisma.company.create({
+          data: { name: caCompanyName }
+        });
+      }
+
+      await contaAzulService.saveCompanyAuth(
+        company.id,
+        token.access_token,
+        token.refresh_token,
+        token.expires_in
+      );
+
+      results.push({
+        id: company.id,
+        name: company.name,
+        caId: caCompanyId
+      });
+      
+      console.log(`[OAuth] Saved/Updated company: ${company.name} (${company.id})`);
     }
 
-    // Save authentication for the company
-    await contaAzulService.saveCompanyAuth(
-      company.id,
-      tokenResponse.access_token,
-      tokenResponse.refresh_token,
-      tokenResponse.expires_in
-    );
-
-    console.log('Successfully authenticated company:', company.id);
-
-    // Redirecionar para o frontend com o ID da empresa e status de sucesso
+    // 3. Redirect to frontend
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    return res.redirect(`${frontendUrl}?companyId=${company.id}&authenticated=true`);
-  } catch (error) {
-    // 4. Tratamento de Resposta (Falha)
-    console.error('Error in OAuth callback:', error);
+    const firstCompanyId = results.length > 0 ? results[0].id : '';
     
-    // Detailed error logging is already handled in the service, but we catch it here too
+    return res.redirect(`${frontendUrl}/dashboard?authenticated=true&count=${results.length}&companyId=${firstCompanyId}`);
+  } catch (error) {
+    console.error('Error in OAuth callback:', error);
     res.status(500).json({
       error: 'callback_error',
       message: error instanceof Error ? error.message : 'Unknown error'
@@ -155,14 +175,23 @@ export const authorizeCompany = async (req: Request, res: Response): Promise<voi
     }
 
     // Exchange code for tokens
-    const tokenResponse = await contaAzulService.exchangeCodeForToken(code as string);
+    const tokenResponses = await contaAzulService.exchangeCodeForToken(code as string);
+
+    if (tokenResponses.length === 0) {
+      res.status(400).json({ error: 'No tokens received' });
+      return;
+    }
+
+    // Since we are authorizing a specific company, we take the first token
+    // In a multi-company scenario, this manual authorize might need more context
+    const token = tokenResponses[0];
 
     // Save authentication for the company
     await contaAzulService.saveCompanyAuth(
       companyId,
-      tokenResponse.access_token,
-      tokenResponse.refresh_token,
-      tokenResponse.expires_in
+      token.access_token,
+      token.refresh_token,
+      token.expires_in
     );
 
     res.json({

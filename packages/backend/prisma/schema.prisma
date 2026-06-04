@@ -18,6 +18,7 @@ model Company {
   // Relations
   contaAzulAuth ContaAzulAuth?
   payables      Payable[]
+  receivables   Receivable[]
 
   @@map("companies")
 }
@@ -53,4 +54,21 @@ model Payable {
   updatedAt DateTime @updatedAt
 
   @@map("payables")
+}
+
+model Receivable {
+  id            String   @id @default(cuid())
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId     String
+  
+  contaAzulId   String   @unique
+  description   String
+  value         Decimal  @db.Decimal(15, 2)
+  dueDate       DateTime
+  status        String   @default("pending")
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("receivables")
 }

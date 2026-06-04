@@ -6,7 +6,7 @@ import axios from 'axios';
 const OAUTH_CONFIG = {
   authorizationEndpoint: 'https://auth.contaazul.com/login',
   tokenEndpoint: 'https://auth.contaazul.com/oauth2/token',
-  redirectUri: 'https://contaazul.com',
+  redirectUri: 'https://contaazul.com', // This should be updated by environment variables
   scope: 'openid profile aws.cognito.signin.user.admin',
 };
 

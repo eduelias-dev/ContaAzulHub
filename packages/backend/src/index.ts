@@ -49,7 +49,10 @@ app.post('/api/auth/refresh/:companyId', authController.refreshToken);
 // DELETE /api/auth/disconnect/:companyId - Remove authentication
 app.delete('/api/auth/disconnect/:companyId', authController.disconnectCompany);
 
-// ============ Payable Routes ============
+// ============ Payable & Receivable Routes ============
+// POST /api/payables/sync-all - Trigger global sync for all companies
+app.post('/api/payables/sync-all', payableController.syncAllPayables);
+
 // GET /api/payables/:companyId - List payables
 app.get('/api/payables/:companyId', payableController.listPayables);
 
@@ -64,6 +67,15 @@ app.get('/api/payables/:companyId/sync/status', payableController.getSyncStatus)
 
 // DELETE /api/payables/:companyId - Delete all payables (testing)
 app.delete('/api/payables/:companyId', payableController.deleteAllPayables);
+
+// GET /api/receivables/:companyId - List receivables
+app.get('/api/receivables/:companyId', payableController.listReceivables);
+
+// GET /api/receivables/:companyId/:receivableId - Get single receivable
+app.get('/api/receivables/:companyId/:receivableId', payableController.getReceivable);
+
+// POST /api/receivables/:companyId/sync - Trigger manual sync
+app.post('/api/receivables/:companyId/sync', payableController.syncReceivables);
 
 // Error handling middleware
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

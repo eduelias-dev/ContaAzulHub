@@ -6,6 +6,76 @@ const prisma = new PrismaClient();
 const contaAzulService = new ContaAzulService(prisma);
 
 /**
+ * POST /api/payables/sync-all
+ * Trigger synchronization for all authorized companies (Payables & Receivables)
+ */
+export const syncAllPayables = async (req: Request, res: Response): Promise<void> => {
+  try {
+    console.log('[Backend] Global sync requested (Payables & Receivables)');
+    
+    // Trigger global sync in background
+    const syncPromise = contaAzulService.syncAllCompaniesFinancials();
+
+    res.json({
+      success: true,
+      message: 'Global synchronization of all financial records started',
+    });
+
+    syncPromise.then((results) => {
+      const totalPayables = results.reduce((acc, curr) => acc + curr.payables, 0);
+      const totalReceivables = results.reduce((acc, curr) => acc + curr.receivables, 0);
+      console.log(`[Backend] Global sync completed. Payables: ${totalPayables}, Receivables: ${totalReceivables}`);
+    }).catch((error) => {
+      console.error('[Backend] Global sync failed:', error);
+    });
+  } catch (error) {
+    console.error('Error triggering global sync:', error);
+    res.status(500).json({
+      error: 'Failed to trigger global synchronization',
+    });
+  }
+};
+
+/**
+ * GET /api/receivables/:companyId
+ * List all receivables for a company
+ */
+export const listReceivables = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { companyId } = req.params;
+    const page = parseInt(req.query.page as string) || 1;
+    const pageSize = parseInt(req.query.pageSize as string) || 20;
+
+    const skip = (page - 1) * pageSize;
+
+    const [receivables, total] = await Promise.all([
+      prisma.receivable.findMany({
+        where: { companyId },
+        orderBy: { dueDate: 'asc' },
+        skip,
+        take: pageSize,
+      }),
+      prisma.receivable.count({ where: { companyId } }),
+    ]);
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    res.json({
+      data: receivables,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error('Error listing receivables:', error);
+    res.status(500).json({ error: 'Failed to list receivables' });
+  }
+};
+
+/**
  * GET /api/payables/:companyId
  * List all payables for a company
  */
@@ -112,6 +182,68 @@ export const getPayable = async (req: Request, res: Response): Promise<void> => 
     res.status(500).json({
       error: 'Failed to get payable',
     });
+  }
+};
+
+/**
+ * GET /api/receivables/:companyId/:receivableId
+ * Get a single receivable
+ */
+export const getReceivable = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { companyId, receivableId } = req.params;
+
+    const receivable = await prisma.receivable.findFirst({
+      where: {
+        id: receivableId,
+        companyId,
+      },
+    });
+
+    if (!receivable) {
+      res.status(404).json({ error: 'Receivable not found' });
+      return;
+    }
+
+    res.json(receivable);
+  } catch (error) {
+    console.error('Error getting receivable:', error);
+    res.status(500).json({ error: 'Failed to get receivable' });
+  }
+};
+
+/**
+ * POST /api/receivables/:companyId/sync
+ * Trigger manual synchronization of receivables from Conta Azul API
+ */
+export const syncReceivables = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { companyId } = req.params;
+
+    // Verify company exists
+    const company = await prisma.company.findUnique({ where: { id: companyId } });
+    if (!company) {
+      res.status(404).json({ error: 'Company not found' });
+      return;
+    }
+
+    // Trigger sync in background
+    const syncPromise = contaAzulService.syncReceivables(companyId);
+
+    res.json({
+      success: true,
+      message: 'Receivables synchronization started',
+      companyId,
+    });
+
+    syncPromise.then((count) => {
+      console.log(`Successfully synced ${count} receivables for company ${companyId}`);
+    }).catch((error) => {
+      console.error(`Failed to sync receivables for company ${companyId}:`, error);
+    });
+  } catch (error) {
+    console.error('Error triggering receivables sync:', error);
+    res.status(500).json({ error: 'Failed to trigger synchronization' });
   }
 };
 
